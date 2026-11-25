@@ -184,6 +184,7 @@ fun HomeScreen(vm: MainViewModel) {
                 "Reads English, Urdu and Arabic.",
             style = MaterialTheme.typography.bodySmall,
         )
+        LearningCard(vm)
         if (vm.undoCount > 0) {
             OutlinedButton(
                 onClick = vm::undoMoves,
@@ -258,8 +259,15 @@ fun ResultsScreen(vm: MainViewModel) {
             }
         }
         Row(Modifier.padding(horizontal = 8.dp)) {
-            TextButton(onClick = { current.forEach { it.selected = true } }) { Text("Select all") }
-            TextButton(onClick = { current.forEach { it.selected = false } }) { Text("Select none") }
+            TextButton(onClick = { current.forEach { it.set(true) } }) { Text("Select all") }
+            TextButton(onClick = { current.forEach { it.set(false) } }) { Text("Select none") }
+        }
+        if (tabs[tab].first == Decision.KEEP && current.isNotEmpty()) {
+            Text(
+                "Most likely posters are shown first. Select any it missed — it learns from them.",
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(horizontal = 16.dp),
+            )
         }
         if (current.isEmpty()) {
             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
@@ -330,7 +338,7 @@ fun ResultsScreen(vm: MainViewModel) {
                     modifier = Modifier.fillMaxSize(),
                 )
                 Button(
-                    onClick = { item.selected = !item.selected },
+                    onClick = { item.set(!item.selected) },
                     modifier = Modifier.align(Alignment.BottomCenter).padding(32.dp),
                 ) { Text(if (item.selected) "Unselect" else "Select") }
             }
@@ -347,7 +355,7 @@ fun Tile(item: Item, onLongPress: () -> Unit) {
             .aspectRatio(1f)
             .clip(RoundedCornerShape(8.dp))
             .combinedClickable(
-                onClick = { item.selected = !item.selected },
+                onClick = { item.set(!item.selected) },
                 onLongClick = onLongPress,
             ),
     ) {
@@ -362,9 +370,46 @@ fun Tile(item: Item, onLongPress: () -> Unit) {
         }
         Checkbox(
             checked = item.selected,
-            onCheckedChange = { item.selected = it },
+            onCheckedChange = { item.set(it) },
             colors = CheckboxDefaults.colors(uncheckedColor = Color.White),
             modifier = Modifier.align(Alignment.TopEnd),
+        )
+    }
+}
+
+@Composable
+fun LearningCard(vm: MainViewModel) {
+    var confirmReset by remember { mutableStateOf(false) }
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp)) {
+            Text("Learning", style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(4.dp))
+            val counts = "${vm.learnedPosters} posters and ${vm.learnedOthers} other images"
+            if (vm.learningActive) {
+                Text("Learned from $counts. Your choices now shape the results.")
+            } else {
+                Text(
+                    "Learns from what you move, delete and unselect. So far: $counts. " +
+                        "It starts using them after ${Model.MIN_EACH} of each.",
+                )
+            }
+            if (vm.learnedPosters + vm.learnedOthers > 0) {
+                TextButton(onClick = { confirmReset = true }) { Text("Reset learning") }
+            }
+        }
+    }
+    if (confirmReset) {
+        AlertDialog(
+            onDismissRequest = { confirmReset = false },
+            title = { Text("Reset learning?") },
+            text = { Text("The app forgets what it learned from your choices and goes back to its starting rules. Your images aren't affected.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmReset = false
+                    vm.resetLearning()
+                }) { Text("Reset") }
+            },
+            dismissButton = { TextButton(onClick = { confirmReset = false }) { Text("Cancel") } },
         )
     }
 }

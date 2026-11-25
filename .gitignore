@@ -5,3 +5,4 @@ local.properties
 *.iml
 app/src/main/assets/tessdata/
 PosterSorter.apk
+app/src/main/assets/*.tflite

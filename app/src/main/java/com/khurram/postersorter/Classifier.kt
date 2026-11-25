@@ -4,16 +4,29 @@ enum class Decision { POSTER, CHECK, KEEP }
 
 data class ScanResult(val decision: Decision, val words: Int, val keywords: Int)
 
+/** What the text reader found in one image. */
+class TextStats(
+    val words: List<String>,   // confidently read words, any script
+    val anyWords: Int,         // text-like words, even if poorly read
+    val arabicWords: Int,      // words in Urdu/Arabic script, even if poorly read
+    val digits: Int,
+    val textArea: Float,       // fraction of the image covered by text
+)
+
 /**
- * Decides poster / not sure / keep from the words read in an image.
+ * Starting rules, used before the app has learned from your choices.
  * Posters are full of text (dates, times, venues, prices). Family photos
  * have little or none, even when a poster also shows people.
  */
 object Classifier {
-    // Raise these if family photos get caught, lower if posters slip through.
-    private const val POSTER_WORDS = 25      // this many words = poster
-    private const val POSTER_WORDS_KW = 10   // ...or this many plus 2+ event keywords
-    private const val CHECK_WORDS = 6        // some text, not clearly a poster
+    private const val POSTER_WORDS = 25
+    private const val POSTER_WORDS_KW = 10
+    private const val CHECK_WORDS = 6
+
+    // Urdu text (especially Nastaliq) is often read poorly, so also count
+    // Urdu/Arabic-script words even when the reader isn't sure of them.
+    private const val POSTER_ARABIC = 25
+    private const val CHECK_ARABIC = 10
 
     private val english = Regex(
         """\b(tickets?|rsvp|venue|join us|invit\w*|presents?|live|event|festival|""" +
@@ -28,19 +41,20 @@ object Classifier {
         RegexOption.IGNORE_CASE
     )
 
-    // Urdu / Arabic: invitation, event, gathering, date, venue, time, day, hall, tickets, guest
     private val urduArabic = Regex(
         "دعوت|دعوة|تقریب|حفل|محفل|بتاریخ|التاريخ|بمقام|مكان|بوقت|الساعة|" +
-            "بروز|يوم|ہال|قاعة|ٹکٹ|تذاكر|مہمان خصوصی|ضيف"
+            "بروز|يوم|ہال|قاعة|ٹکٹ|تذاكر|مہمان خصوصی|ضيف|مجلس|جلسہ|اجتماع|" +
+            "پروگرام|میلاد|عرس|شام|بجے|منعقد|زیر اہتمام|مدعو"
     )
 
-    fun classify(words: List<String>): ScanResult {
-        val text = words.joinToString(" ")
+    fun classify(s: TextStats): ScanResult {
+        val text = s.words.joinToString(" ")
         val kw = english.findAll(text).count() + urduArabic.findAll(text).count()
-        val n = words.size
+        val n = s.words.size
         val decision = when {
             n >= POSTER_WORDS || (n >= POSTER_WORDS_KW && kw >= 2) -> Decision.POSTER
-            n >= CHECK_WORDS || kw >= 2 -> Decision.CHECK
+            s.arabicWords >= POSTER_ARABIC && s.textArea >= 0.05f -> Decision.POSTER
+            n >= CHECK_WORDS || kw >= 2 || s.arabicWords >= CHECK_ARABIC -> Decision.CHECK
             else -> Decision.KEEP
         }
         return ScanResult(decision, n, kw)

@@ -23,14 +23,16 @@ jobs:
         with:
           gradle-version: "8.11.1"
 
-      - name: Download English, Urdu and Arabic reading data
+      - name: Download reading and image-recognition data
         run: |
           mkdir -p app/src/main/assets/tessdata
           for l in eng urd ara; do
             curl -fsSL -o app/src/main/assets/tessdata/$l.traineddata \
               https://github.com/tesseract-ocr/tessdata_fast/raw/main/$l.traineddata
           done
-          ls -la app/src/main/assets/tessdata
+          curl -fsSL -o app/src/main/assets/mobilenet_v3_small.tflite \
+            https://storage.googleapis.com/mediapipe-models/image_embedder/mobilenet_v3_small/float32/1/mobilenet_v3_small.tflite
+          ls -la app/src/main/assets app/src/main/assets/tessdata
 
       - name: Build APK
         run: gradle :app:assembleRelease --stacktrace

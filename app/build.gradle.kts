@@ -16,6 +16,7 @@ android {
         targetSdk = 35
         versionCode = buildNumber
         versionName = "1.0.$buildNumber"
+        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
     }
 
     // One fixed key, so new versions install over old ones.
@@ -49,7 +50,7 @@ android {
         compose = true
     }
     androidResources {
-        noCompress += "traineddata"
+        noCompress += listOf("traineddata", "tflite")
     }
     lint {
         checkReleaseBuilds = false
@@ -69,4 +70,5 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("io.coil-kt:coil-compose:2.7.0")
     implementation("cz.adaptech.tesseract4android:tesseract4android:4.9.0")
+    implementation("com.google.mediapipe:tasks-vision:0.10.20")
 }
