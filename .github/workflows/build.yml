@@ -1,0 +1,48 @@
+name: Build app
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
+
+      - name: Download English, Urdu and Arabic reading data
+        run: |
+          mkdir -p app/src/main/assets/tessdata
+          for l in eng urd ara; do
+            curl -fsSL -o app/src/main/assets/tessdata/$l.traineddata \
+              https://github.com/tesseract-ocr/tessdata_fast/raw/main/$l.traineddata
+          done
+          ls -la app/src/main/assets/tessdata
+
+      - name: Build APK
+        run: gradle :app:assembleRelease --stacktrace
+
+      - name: Rename APK
+        run: cp app/build/outputs/apk/release/app-release.apk PosterSorter.apk
+
+      - name: Publish download
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: Poster Sorter 1.0.${{ github.run_number }}
+          body: Download PosterSorter.apk on your phone and open it to install.
+          files: PosterSorter.apk
+          make_latest: true
