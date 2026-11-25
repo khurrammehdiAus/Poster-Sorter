@@ -38,13 +38,13 @@ jobs:
         run: gradle :app:assembleRelease --stacktrace
 
       - name: Rename APK
-        run: cp app/build/outputs/apk/release/app-release.apk PosterSorter.apk
+        run: cp app/build/outputs/apk/release/app-release.apk Siftly.apk
 
       - name: Publish download
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v1.0.${{ github.run_number }}
-          name: Poster Sorter 1.0.${{ github.run_number }}
-          body: Download PosterSorter.apk on your phone and open it to install.
-          files: PosterSorter.apk
+          name: Siftly 1.0.${{ github.run_number }}
+          body: Download Siftly.apk on your phone and open it to install.
+          files: Siftly.apk
           make_latest: true

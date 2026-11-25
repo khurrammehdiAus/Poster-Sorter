@@ -6,3 +6,4 @@ local.properties
 app/src/main/assets/tessdata/
 PosterSorter.apk
 app/src/main/assets/*.tflite
+Siftly.apk

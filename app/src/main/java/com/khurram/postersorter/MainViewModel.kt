@@ -24,18 +24,35 @@ import java.util.concurrent.ConcurrentHashMap
 
 enum class Phase { HOME, SCANNING, RESULTS }
 
+/**
+ * One image in the results.
+ * bucket = the tab it was sorted into; assigned = what you say it is
+ * (starts as the app's best guess); selected = clear it out.
+ */
 class Item(
     val file: File,
     val features: FloatArray,
-    val score: Float,
-    val decision: Decision,
+    val clutterScore: Float,
+    val bucket: Bucket,
+    guess: Category,
 ) {
-    var selected by mutableStateOf(decision == Decision.POSTER)
+    var assigned by mutableStateOf(if (bucket == Bucket.KEEP || bucket == Bucket.CHECK) guess else Category.entries[bucket.ordinal + 1])
+    var selected by mutableStateOf(bucket in setOf(Bucket.POSTER, Bucket.FORWARD, Bucket.MEME))
     var touched = false
 
     fun set(value: Boolean) {
         selected = value
         touched = true
+    }
+
+    fun assign(c: Category) {
+        touched = true
+        if (c == Category.KEEP) {
+            selected = false
+        } else {
+            assigned = c
+            selected = true
+        }
     }
 }
 
@@ -43,7 +60,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val ctx get() = getApplication<Application>()
     private val moveLog = MoveLog(app)
     private val labels by lazy { LabelStore(ctx) }
-    private val modelFile get() = File(ctx.filesDir, "model.bin")
+    private val modelFile get() = File(ctx.filesDir, "model_v3.bin")
     private var model: Model? = null
 
     var hasPermission by mutableStateOf(false)
@@ -56,8 +73,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     var undoCount by mutableIntStateOf(0)
     var busy by mutableStateOf(false)
     var message by mutableStateOf<String?>(null)
-    var learnedPosters by mutableIntStateOf(0)
-    var learnedOthers by mutableIntStateOf(0)
+    var learned by mutableStateOf(mapOf<Category, Int>())
     var learningActive by mutableStateOf(false)
     val items = mutableStateListOf<Item>()
 
@@ -74,8 +90,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun updateLearningStats() {
-        learnedPosters = labels.posters()
-        learnedOthers = labels.others()
+        learned = Category.entries.associateWith { labels.count(it) }
         learningActive = model != null
     }
 
@@ -98,11 +113,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             items.clear()
             progressDone = 0
             val files = withContext(Dispatchers.IO) { sources.flatMap { Storage.listImages(it) } }
-            // Posters you've already moved are examples to learn from.
-            val seeds = withContext(Dispatchers.IO) {
-                Storage.listImages(Storage.posterDir).filter { !labels.has(it.name) }
+            // Images you've already sorted into Siftly's folders are examples to learn from.
+            val seeds: List<Pair<File, Category>> = withContext(Dispatchers.IO) {
+                Storage.exampleFolders().flatMap { (dir, c) ->
+                    Storage.listImages(dir).filter { !labels.has(it.name) }.map { it to c }
+                }
             }
-            val all = files + seeds
+            val all = files + seeds.map { it.first }
             progressTotal = all.size
 
             val (dataPath, langs) = withContext(Dispatchers.IO) { OcrData.prepare(ctx) }
@@ -152,25 +169,30 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
             withContext(Dispatchers.IO) { store.save() }
 
-            // Learn from the Event Posters folder.
-            val seeded = seeds.mapNotNull { f -> results[f.path]?.let { f to it } }
-            if (seeded.isNotEmpty()) {
-                seeded.forEach { (f, a) -> labels.put(f.name, Sample(1f, 1f, a.features)) }
-                retrain()
+            // Learn from the example folders, and carry over older choices.
+            var changed = false
+            for ((f, c) in seeds) {
+                results[f.path]?.let { labels.put(f.name, Sample(c.ordinal, 1f, it.features)); changed = true }
             }
+            for (f in files) {
+                results[f.path]?.let { if (labels.migrate(f.name, it.features)) changed = true }
+            }
+            if (changed) retrain()
 
             val m = model
             val built = files.mapNotNull { f ->
                 results[f.path]?.let { a ->
-                    val s = m?.score(a.features) ?: Features.heuristicScore(a.features)
-                    val d = when {
-                        s >= 0.6f -> Decision.POSTER
-                        s >= 0.35f -> Decision.CHECK
-                        else -> Decision.KEEP
+                    val p = m?.score(a.features) ?: Features.heuristicFrom(a.features)
+                    val best = Category.clutter.maxBy { p[it.ordinal] }
+                    val clutter = 1f - p[0]
+                    val bucket = when {
+                        p[best.ordinal] >= 0.55f -> best.bucket()
+                        clutter >= 0.35f -> Bucket.CHECK
+                        else -> Bucket.KEEP
                     }
-                    Item(f, a.features, s, d)
+                    Item(f, a.features, clutter, bucket, best)
                 }
-            }.sortedByDescending { it.score }
+            }.sortedByDescending { it.clutterScore }
             items.addAll(built)
             phase = Phase.RESULTS
         }
@@ -189,27 +211,30 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * Learns from what you did: images you moved or deleted are posters;
-     * images you unselected aren't. Images you never touched in the Kept
-     * tab count only a little, in case you didn't look at them.
+     * Learns from what you did: images you cleared out are examples of the
+     * type you gave them; images you unselected are ones to keep. Images you
+     * never touched in the Kept tab count only a little, in case you didn't
+     * look at them.
      */
     private suspend fun learnFrom(actedOn: List<Item>) {
         val acted = actedOn.toSet()
         val untouchedKept = items.filter {
-            it !in acted && !it.selected && !it.touched && it.decision == Decision.KEEP
+            it !in acted && !it.selected && !it.touched && it.bucket == Bucket.KEEP
         }.shuffled().take(300).toSet()
         withContext(Dispatchers.Default) {
-            for (item in actedOn) labels.put(item.file.name, Sample(1f, 1f, item.features))
+            for (item in actedOn) {
+                labels.put(item.file.name, Sample(item.assigned.ordinal, 1f, item.features))
+            }
             for (item in items) {
                 if (item in acted || item.selected) continue
                 val weight = when {
                     item.touched -> 1f
-                    item.decision == Decision.CHECK -> 0.5f
-                    item.decision == Decision.POSTER -> 0.7f
+                    item.bucket == Bucket.CHECK -> 0.5f
+                    item.bucket != Bucket.KEEP -> 0.7f
                     item in untouchedKept -> 0.15f
                     else -> continue
                 }
-                labels.put(item.file.name, Sample(0f, weight, item.features))
+                labels.put(item.file.name, Sample(Category.KEEP.ordinal, weight, item.features))
             }
         }
         retrain()
@@ -246,7 +271,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             busy = true
             val moved = withContext(Dispatchers.IO) {
                 selected.mapNotNull { item ->
-                    Storage.move(item.file, Storage.posterDir)?.let { dest ->
+                    Storage.move(item.file, Storage.folderFor(item.assigned))?.let { dest ->
                         moveLog.add(item.file, dest)
                         item to dest
                     }
@@ -258,9 +283,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             undoCount = withContext(Dispatchers.IO) { moveLog.count() }
             busy = false
             val failed = selected.size - moved.size
-            message = "Moved ${moved.size} to Pictures › Event Posters" +
+            message = "Moved ${moved.size} to Pictures › Siftly" +
                 (if (failed > 0) " ($failed couldn't be moved)" else "") +
-                ". Learned from your choices — scan again for better results."
+                ". Learned from your choices — scan again for sharper results."
         }
     }
 

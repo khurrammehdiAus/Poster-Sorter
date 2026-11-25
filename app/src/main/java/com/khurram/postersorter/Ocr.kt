@@ -39,30 +39,43 @@ object OcrData {
 class Analysis(val features: FloatArray, val heuristic: ScanResult)
 
 object Features {
-    const val TEXT_DIMS = 8
-    const val HEURISTIC_INDEX = 7
+    const val TEXT_DIMS = 14
+    private const val H = 10 // where the starting-rules verdict lives: keep, poster, forward, meme
 
-    fun build(s: TextStats, h: ScanResult, width: Int, height: Int, embedding: FloatArray): FloatArray {
+    fun build(s: TextStats, k: Keywords, h: ScanResult, width: Int, height: Int, embedding: FloatArray): FloatArray {
         fun lg(v: Int) = ln(1f + v)
         val aspect = (height.toFloat() / max(1, width)).coerceIn(0.3f, 3f)
+        val verdict = heuristicVector(h)
         val text = floatArrayOf(
             lg(s.words.size),
             lg(s.anyWords),
             lg(s.arabicWords),
-            lg(h.keywords),
+            lg(k.event),
+            lg(k.forward),
+            lg(k.meme),
             lg(s.digits),
             s.textArea,
+            s.bandFraction,
             ln(aspect),
-            when (h.decision) {
-                Decision.POSTER -> 1f
-                Decision.CHECK -> 0.5f
-                Decision.KEEP -> 0f
-            },
+            verdict[0], verdict[1], verdict[2], verdict[3],
         )
         return text + embedding
     }
 
-    fun heuristicScore(f: FloatArray): Float = f[HEURISTIC_INDEX]
+    /** Starting rules as probabilities for keep, poster, forward, meme. */
+    fun heuristicVector(h: ScanResult): FloatArray {
+        val v = FloatArray(4)
+        when (h.bucket) {
+            Bucket.KEEP -> v[0] = 1f
+            Bucket.POSTER -> v[1] = 1f
+            Bucket.FORWARD -> v[2] = 1f
+            Bucket.MEME -> v[3] = 1f
+            Bucket.CHECK -> { v[0] = 0.5f; v[h.guess.ordinal] += 0.5f }
+        }
+        return v
+    }
+
+    fun heuristicFrom(f: FloatArray): FloatArray = f.copyOfRange(H, H + 4)
 }
 
 /** Reads text and recognises the look of an image. One per worker thread. */
@@ -91,9 +104,13 @@ class Analyzer(context: Context, dataPath: String, langs: String) {
         val bmp = decode(file) ?: return null
         try {
             val stats = readText(bmp)
-            val heuristic = Classifier.classify(stats)
+            val keywords = Classifier.keywords(stats)
+            val heuristic = Classifier.classify(stats, keywords)
             val embedding = embed(bmp)
-            return Analysis(Features.build(stats, heuristic, bmp.width, bmp.height, embedding), heuristic)
+            return Analysis(
+                Features.build(stats, keywords, heuristic, bmp.width, bmp.height, embedding),
+                heuristic,
+            )
         } finally {
             bmp.recycle()
         }
@@ -105,6 +122,9 @@ class Analyzer(context: Context, dataPath: String, langs: String) {
         var arabic = 0
         var digits = 0
         var area = 0L
+        var bandArea = 0L
+        val top = bmp.height * 0.25f
+        val bottom = bmp.height * 0.75f
         try {
             api.setImage(bmp)
             api.getUTF8Text()
@@ -120,7 +140,10 @@ class Analyzer(context: Context, dataPath: String, langs: String) {
                     if (conf >= 20f && letters >= 1) {
                         any++
                         val r = it.getBoundingRect(level)
-                        area += r.width().toLong() * r.height().toLong()
+                        val boxArea = r.width().toLong() * r.height().toLong()
+                        area += boxArea
+                        val cy = r.exactCenterY()
+                        if (cy <= top || cy >= bottom) bandArea += boxArea
                         if (w.any { ch -> isArabicScript(ch) }) arabic++
                     }
                     if (conf >= 40f) digits += w.count { ch -> ch.isDigit() }
@@ -132,7 +155,11 @@ class Analyzer(context: Context, dataPath: String, langs: String) {
             api.clear()
         }
         val imageArea = max(1L, bmp.width.toLong() * bmp.height.toLong())
-        return TextStats(words, any, arabic, digits, (area.toFloat() / imageArea).coerceIn(0f, 1f))
+        return TextStats(
+            words, any, arabic, digits,
+            (area.toFloat() / imageArea).coerceIn(0f, 1f),
+            if (area > 0) bandArea.toFloat() / area else 0f,
+        )
     }
 
     private fun isArabicScript(ch: Char) =

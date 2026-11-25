@@ -13,7 +13,13 @@ object Storage {
         "Android/media/com.whatsapp.w4b/WhatsApp Business/Media/WhatsApp Business Images",
     )
 
-    val posterDir: File get() = File(root, "Pictures/Event Posters")
+    /** Where each kind of clutter is moved: Pictures/Siftly/Posters, /Forwards, /Memes. */
+    fun folderFor(c: Category): File = File(root, "Pictures/Siftly/${c.folder}")
+
+    /** Folders whose images are examples to learn from, and what they're examples of. */
+    fun exampleFolders(): List<Pair<File, Category>> =
+        Category.clutter.map { folderFor(it) to it } +
+            (File(root, "Pictures/Event Posters") to Category.POSTER) // from Poster Sorter
 
     /** WhatsApp image folders that exist on this phone. */
     fun sourceDirs(): List<File> = candidates.map { File(root, it) }.filter { it.isDirectory }

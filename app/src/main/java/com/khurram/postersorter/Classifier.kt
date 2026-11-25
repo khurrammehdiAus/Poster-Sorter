@@ -1,62 +1,114 @@
 package com.khurram.postersorter
 
-enum class Decision { POSTER, CHECK, KEEP }
+/** What an image is. KEEP must stay first and POSTER second (saved learning depends on it). */
+enum class Category(val label: String, val folder: String) {
+    KEEP("Keep", ""),
+    POSTER("Poster", "Posters"),
+    FORWARD("Forward", "Forwards"),
+    MEME("Meme", "Memes");
 
-data class ScanResult(val decision: Decision, val words: Int, val keywords: Int)
+    companion object {
+        val clutter = listOf(POSTER, FORWARD, MEME)
+    }
+}
+
+/** Which tab an image lands in. */
+enum class Bucket { POSTER, FORWARD, MEME, CHECK, KEEP }
+
+fun Category.bucket(): Bucket = when (this) {
+    Category.POSTER -> Bucket.POSTER
+    Category.FORWARD -> Bucket.FORWARD
+    Category.MEME -> Bucket.MEME
+    Category.KEEP -> Bucket.KEEP
+}
+
+/** Starting-rules verdict: a bucket, plus the most likely clutter type. */
+data class ScanResult(val bucket: Bucket, val guess: Category)
 
 /** What the text reader found in one image. */
 class TextStats(
     val words: List<String>,   // confidently read words, any script
     val anyWords: Int,         // text-like words, even if poorly read
-    val arabicWords: Int,      // words in Urdu/Arabic script, even if poorly read
+    val arabicWords: Int,      // Urdu/Arabic-script words, even if poorly read
     val digits: Int,
     val textArea: Float,       // fraction of the image covered by text
+    val bandFraction: Float,   // share of the text in the top or bottom quarter (meme captions)
 )
+
+class Keywords(val event: Int, val forward: Int, val meme: Int)
 
 /**
  * Starting rules, used before the app has learned from your choices.
- * Posters are full of text (dates, times, venues, prices). Family photos
- * have little or none, even when a poster also shows people.
+ * - Posters: lots of text with dates, times, venues, prices.
+ * - Forwards: greetings, chain messages, "share this", offers and links.
+ * - Memes: a short caption at the top/bottom of a picture, or meme phrases.
+ * Family photos have little or no text.
  */
 object Classifier {
-    private const val POSTER_WORDS = 25
-    private const val POSTER_WORDS_KW = 10
-    private const val CHECK_WORDS = 6
-
-    // Urdu text (especially Nastaliq) is often read poorly, so also count
-    // Urdu/Arabic-script words even when the reader isn't sure of them.
-    private const val POSTER_ARABIC = 25
-    private const val CHECK_ARABIC = 10
-
-    private val english = Regex(
+    private val event = Regex(
         """\b(tickets?|rsvp|venue|join us|invit\w*|presents?|live|event|festival|""" +
             """concert|workshop|seminar|fundraiser|dinner|gala|free entry|entry|""" +
             """register|registration|bookings?|book now|admission|doors open|""" +
             """program|programme|sponsor\w*|guest speaker|speaker|celebrat\w*|""" +
             """mon(day)?|tue(s|sday)?|wed(nesday)?|thu(rs|rsday)?|fri(day)?|""" +
             """sat(urday)?|sun(day)?|jan(uary)?|feb(ruary)?|mar(ch)?|apr(il)?|""" +
-            """may|june?|july?|aug(ust)?|sep(t|tember)?|oct(ober)?|nov(ember)?|""" +
-            """dec(ember)?|www|\.com|\.au)\b""" +
-            """|\d{1,2}(:\d{2})?\s?(am|pm)\b|\$\d+|\b\d{1,2}(st|nd|rd|th)\b|@\w+""",
+            """june?|july?|aug(ust)?|sep(t|tember)?|oct(ober)?|nov(ember)?|""" +
+            """dec(ember)?|venue|hall|centre|center)\b""" +
+            """|\d{1,2}(:\d{2})?\s?(am|pm)\b|\$\d+|\b\d{1,2}(st|nd|rd|th)\b""" +
+            "|دعوت|دعوة|تقریب|حفل|محفل|بتاریخ|التاريخ|بمقام|مكان|بوقت|الساعة|" +
+            "بروز|ہال|قاعة|ٹکٹ|تذاكر|مہمان خصوصی|ضيف|مجلس|جلسہ|اجتماع|" +
+            "پروگرام|میلاد|عرس|بجے|منعقد|زیر اہتمام|مدعو",
         RegexOption.IGNORE_CASE
     )
 
-    private val urduArabic = Regex(
-        "دعوت|دعوة|تقریب|حفل|محفل|بتاریخ|التاريخ|بمقام|مكان|بوقت|الساعة|" +
-            "بروز|يوم|ہال|قاعة|ٹکٹ|تذاكر|مہمان خصوصی|ضيف|مجلس|جلسہ|اجتماع|" +
-            "پروگرام|میلاد|عرس|شام|بجے|منعقد|زیر اہتمام|مدعو"
+    private val forward = Regex(
+        """\b(good (morning|night|evening|afternoon)|have a (nice|great|blessed)|""" +
+            """jum+u?a mubarak|eid mubarak|ramadan (mubarak|kareem)|blessed|""" +
+            """forward(ed)?|share this|send this|pass (it|this) on|must (watch|read)|""" +
+            """viral|breaking news|click|link|subscribe|offer|discount|sale|""" +
+            """limited time|winner|prize|loan|crypto|bitcoin|invest\w*|earn|""" +
+            """thought of the day|quote|motivation\w*|whatsapp|http\S*|www\S*|""" +
+            """bit\.ly|wa\.me|t\.me|youtube)\b|\d+\s?%""" +
+            "|صبح بخیر|شب بخیر|جمعہ مبارک|جمعة مباركة|جمعه مبارک|عید مبارک|" +
+            "رمضان مبارک|صباح الخير|مساء الخير|شیئر|فارورڈ|آگے بھیجیں|سبحان اللہ|" +
+            "ماشاءاللہ|الحمدللہ|خوشخبری|آفر|رعایت",
+        RegexOption.IGNORE_CASE
     )
 
-    fun classify(s: TextStats): ScanResult {
+    private val meme = Regex(
+        """\b(when (you|your|u|ur|my)|me:|nobody:|pov|be like|lol|lmao|lmfao|meme|""" +
+            """that moment|that feeling|literally|bro|mom:|dad:|teacher:|wife:|husband:|""" +
+            """expectation|reality|me after|me trying|starter pack|""" +
+            """no one:|everyone:|my face when|mfw|tfw)\b""",
+        RegexOption.IGNORE_CASE
+    )
+
+    fun keywords(s: TextStats): Keywords {
         val text = s.words.joinToString(" ")
-        val kw = english.findAll(text).count() + urduArabic.findAll(text).count()
+        return Keywords(
+            event.findAll(text).count(),
+            forward.findAll(text).count(),
+            meme.findAll(text).count(),
+        )
+    }
+
+    fun classify(s: TextStats, k: Keywords): ScanResult {
         val n = s.words.size
-        val decision = when {
-            n >= POSTER_WORDS || (n >= POSTER_WORDS_KW && kw >= 2) -> Decision.POSTER
-            s.arabicWords >= POSTER_ARABIC && s.textArea >= 0.05f -> Decision.POSTER
-            n >= CHECK_WORDS || kw >= 2 || s.arabicWords >= CHECK_ARABIC -> Decision.CHECK
-            else -> Decision.KEEP
+        val guess = when {
+            k.forward > k.event && k.forward >= k.meme -> Category.FORWARD
+            k.meme > k.event -> Category.MEME
+            else -> Category.POSTER
         }
-        return ScanResult(decision, n, kw)
+        val captionLayout = s.bandFraction >= 0.7f && n in 2..30 && s.textArea < 0.35f
+        val bucket = when {
+            (n >= 25 && k.event >= 2) || (n >= 10 && k.event >= 3) -> Bucket.POSTER
+            k.forward >= 2 || (k.forward >= 1 && n < 25) -> Bucket.FORWARD
+            (k.meme >= 1 && n <= 40) || captionLayout -> Bucket.MEME
+            n >= 25 || (n >= 10 && k.event >= 2) -> Bucket.POSTER
+            s.arabicWords >= 25 && s.textArea >= 0.05f -> Bucket.POSTER
+            n >= 6 || k.event >= 2 || s.arabicWords >= 10 -> Bucket.CHECK
+            else -> Bucket.KEEP
+        }
+        return ScanResult(bucket, if (captionLayout && bucket == Bucket.CHECK) Category.MEME else guess)
     }
 }
