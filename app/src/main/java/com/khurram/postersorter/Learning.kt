@@ -7,28 +7,43 @@ import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.EOFException
 import java.io.File
+import java.io.FileOutputStream
+import java.nio.ByteBuffer
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.exp
 import kotlin.math.min
 import kotlin.math.sqrt
 
-private fun DataOutputStream.writeFloats(a: FloatArray) {
+// Bulk float reading/writing (same byte format as writeFloat, much faster).
+internal fun DataOutputStream.writeFloats(a: FloatArray) {
     writeInt(a.size)
-    for (v in a) writeFloat(v)
+    val bb = ByteBuffer.allocate(a.size * 4)
+    bb.asFloatBuffer().put(a)
+    write(bb.array())
 }
 
-private fun DataInputStream.readFloats(): FloatArray {
+internal fun DataInputStream.readFloats(): FloatArray {
     val n = readInt()
     require(n in 0..100_000)
-    return FloatArray(n) { readFloat() }
+    val bytes = ByteArray(n * 4)
+    readFully(bytes)
+    val out = FloatArray(n)
+    ByteBuffer.wrap(bytes).asFloatBuffer().get(out)
+    return out
 }
 
-/** Remembers each image's analysis, so images are only read once. */
+/**
+ * Remembers each image's analysis, so images are only read once.
+ * New results are appended as it goes, so an interrupted sift loses nothing.
+ */
 class FeatureStore(context: Context) {
     private class Entry(val modified: Long, val analysis: Analysis)
 
     private val file = File(context.filesDir, "features_v3.bin")
     private val map = ConcurrentHashMap<String, Entry>()
+    private val pending = ConcurrentLinkedQueue<String>()
+    private var records = 0
 
     init {
         if (file.exists()) runCatching {
@@ -40,6 +55,7 @@ class FeatureStore(context: Context) {
                     val guess = Category.entries[input.readInt()]
                     val feats = input.readFloats()
                     map[path] = Entry(modified, Analysis(feats, ScanResult(bucket, guess)))
+                    records++
                 }
             }
         }
@@ -47,19 +63,48 @@ class FeatureStore(context: Context) {
 
     fun get(f: File): Analysis? = map[f.path]?.takeIf { it.modified == f.lastModified() }?.analysis
 
-    fun put(f: File, a: Analysis) { map[f.path] = Entry(f.lastModified(), a) }
+    fun put(f: File, a: Analysis) {
+        map[f.path] = Entry(f.lastModified(), a)
+        pending.add(f.path)
+    }
 
+    private fun DataOutputStream.writeEntry(path: String, e: Entry) {
+        writeUTF(path)
+        writeLong(e.modified)
+        writeInt(e.analysis.heuristic.bucket.ordinal)
+        writeInt(e.analysis.heuristic.guess.ordinal)
+        writeFloats(e.analysis.features)
+    }
+
+    /** Appends new results to the file. */
+    @Synchronized
+    fun flush() {
+        if (pending.isEmpty()) return
+        DataOutputStream(BufferedOutputStream(FileOutputStream(file, true), 1 shl 16)).use { out ->
+            while (true) {
+                val path = pending.poll() ?: break
+                val e = map[path] ?: continue
+                out.writeEntry(path, e)
+                records++
+            }
+        }
+    }
+
+    /** Flushes, and rewrites the file if it holds many out-of-date entries. */
+    @Synchronized
     fun save() {
+        flush()
+        if (records <= map.size + 1000) return
+        pending.clear()
+        var n = 0
         DataOutputStream(BufferedOutputStream(file.outputStream(), 1 shl 16)).use { out ->
             for ((path, e) in map) {
                 if (!File(path).exists()) continue
-                out.writeUTF(path)
-                out.writeLong(e.modified)
-                out.writeInt(e.analysis.heuristic.bucket.ordinal)
-                out.writeInt(e.analysis.heuristic.guess.ordinal)
-                out.writeFloats(e.analysis.features)
+                out.writeEntry(path, e)
+                n++
             }
         }
+        records = n
     }
 }
 

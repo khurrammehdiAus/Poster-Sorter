@@ -99,7 +99,8 @@ class Analyzer(context: Context, dataPath: String, langs: String) {
         if (ok) api.setPageSegMode(TessBaseAPI.PageSegMode.PSM_SPARSE_TEXT)
     }
 
-    fun analyze(file: File): Analysis? {
+    /** Reads an image once: its analysis plus its look-alike fingerprint. */
+    fun analyze(file: File): Pair<Analysis, Long>? {
         if (!ok) return null
         val bmp = decode(file) ?: return null
         try {
@@ -107,10 +108,11 @@ class Analyzer(context: Context, dataPath: String, langs: String) {
             val keywords = Classifier.keywords(stats)
             val heuristic = Classifier.classify(stats, keywords)
             val embedding = embed(bmp)
-            return Analysis(
+            val analysis = Analysis(
                 Features.build(stats, keywords, heuristic, bmp.width, bmp.height, embedding),
                 heuristic,
             )
+            return analysis to DHash.of(bmp)
         } finally {
             bmp.recycle()
         }

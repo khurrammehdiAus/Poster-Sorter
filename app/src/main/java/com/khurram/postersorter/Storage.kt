@@ -16,6 +16,12 @@ object Storage {
     /** Where each kind of clutter is moved: Pictures/Siftly/Posters, /Forwards, /Memes. */
     fun folderFor(c: Category): File = File(root, "Pictures/Siftly/${c.folder}")
 
+    val duplicatesDir: File get() = File(root, "Pictures/Siftly/Duplicates")
+
+    /** Siftly's own folders, left out when sifting the gallery. */
+    fun excludedRoots(): List<String> =
+        listOf(File(root, "Pictures/Siftly").path, File(root, "Pictures/Event Posters").path)
+
     /** Folders whose images are examples to learn from, and what they're examples of. */
     fun exampleFolders(): List<Pair<File, Category>> =
         Category.clutter.map { folderFor(it) to it } +

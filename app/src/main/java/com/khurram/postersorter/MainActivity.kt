@@ -1,11 +1,16 @@
 package com.khurram.postersorter
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -27,9 +32,12 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -53,6 +61,7 @@ import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -76,11 +85,14 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
+import java.io.File
 
 // Siftly brand colours
 object Brand {
@@ -158,7 +170,7 @@ fun App(vm: MainViewModel) {
         Box(Modifier.padding(pad).fillMaxSize()) {
             when {
                 !vm.hasPermission -> PermissionScreen()
-                vm.phase == Phase.SCANNING -> ScanningScreen(vm)
+                ScanEngine.running -> ScanningScreen(vm)
                 vm.phase == Phase.RESULTS -> ResultsScreen(vm)
                 else -> HomeScreen(vm)
             }
@@ -225,6 +237,17 @@ fun PermissionScreen() {
 
 @Composable
 fun HomeScreen(vm: MainViewModel) {
+    val ctx = LocalContext.current
+    var pickAlbums by remember { mutableStateOf(false) }
+    // Ask once to show a progress notification (Android 13+); sift either way.
+    val notifyPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+        vm.startScan()
+    }
+    val startSift = {
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) notifyPermission.launch(Manifest.permission.POST_NOTIFICATIONS) else vm.startScan()
+    }
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
@@ -235,24 +258,43 @@ fun HomeScreen(vm: MainViewModel) {
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
         ) {
             Column(Modifier.padding(16.dp)) {
-                if (vm.sources.isEmpty()) {
-                    Text("Couldn't find your WhatsApp Images folder.", fontWeight = FontWeight.Bold)
+                if (vm.loadingAlbums && vm.albums.isEmpty()) {
+                    Text("Looking through your gallery…")
+                } else if (vm.albums.isEmpty()) {
+                    Text("Couldn't find any images on this phone.", fontWeight = FontWeight.Bold)
                 } else {
                     Text("${vm.imageCount}", fontSize = 34.sp, fontWeight = FontWeight.Bold)
-                    Text("WhatsApp images to sift", style = MaterialTheme.typography.titleMedium)
-                    Text("Images you've sent are left alone.", style = MaterialTheme.typography.bodySmall)
+                    Text(
+                        "images in ${vm.selectedAlbums.size} of ${vm.albums.size} albums",
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                    TextButton(
+                        onClick = { pickAlbums = true },
+                        contentPadding = PaddingValues(0.dp),
+                    ) { Text("Choose albums") }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Find duplicates", fontWeight = FontWeight.SemiBold)
+                            Text(
+                                "Copies and look-alikes across all chosen albums",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        Switch(checked = vm.findDuplicates, onCheckedChange = vm::toggleDuplicates)
+                    }
                 }
             }
         }
         Button(
-            onClick = vm::startScan,
+            onClick = startSift,
             enabled = vm.imageCount > 0 && !vm.busy,
             modifier = Modifier.fillMaxWidth().height(52.dp),
         ) { Text("Sift my images", fontSize = 17.sp) }
         Text(
-            "Finds event posters, forwards (greetings, chain messages, ads) and memes. " +
-                "Reads English, Urdu and Arabic. The first sift takes 1–3 seconds per image, " +
-                "so keep the app open. Later sifts are quick.",
+            "Finds event posters, forwards (greetings, chain messages, ads), memes and duplicates. " +
+                "Reads English, Urdu and Arabic. The first sift takes 1–3 seconds per image, so a " +
+                "whole gallery can take hours. It carries on in the background and resumes if " +
+                "interrupted. Later sifts only read new images.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -265,12 +307,55 @@ fun HomeScreen(vm: MainViewModel) {
             ) { Text("Undo moves (${vm.undoCount} images back to WhatsApp)") }
         }
         Text(
-            "Cleared images go to Pictures › Siftly › Posters, Forwards and Memes. " +
+            "Cleared images go to Pictures › Siftly › Posters, Forwards, Memes and Duplicates. " +
                 "Check them in your Gallery, then delete them there.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
+    if (pickAlbums) AlbumPicker(vm, onDone = { pickAlbums = false })
+}
+
+@Composable
+fun AlbumPicker(vm: MainViewModel, onDone: () -> Unit) {
+    var chosen by remember { mutableStateOf(vm.selectedAlbums) }
+    AlertDialog(
+        onDismissRequest = { vm.setAlbums(chosen); onDone() },
+        title = { Text("Albums to sift") },
+        text = {
+            Column {
+                Row {
+                    TextButton(onClick = { chosen = vm.albums.map { it.key }.toSet() }) { Text("All") }
+                    TextButton(onClick = { chosen = emptySet() }) { Text("None") }
+                }
+                LazyColumn(Modifier.height(380.dp)) {
+                    items(vm.albums, key = { it.key }) { album ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    chosen = if (album.key in chosen) chosen - album.key else chosen + album.key
+                                },
+                        ) {
+                            Checkbox(checked = album.key in chosen, onCheckedChange = null)
+                            Spacer(Modifier.width(8.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(album.name, fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    album.dir.path.removePrefix("/storage/emulated/0/"),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    maxLines = 1,
+                                )
+                            }
+                            Text("${album.count}", style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { vm.setAlbums(chosen); onDone() }) { Text("Done") } },
+    )
 }
 
 @Composable
@@ -328,19 +413,23 @@ fun ScanningScreen(vm: MainViewModel) {
     ) {
         Image(painterResource(R.drawable.ic_logo), contentDescription = null, modifier = Modifier.size(88.dp))
         Spacer(Modifier.height(20.dp))
-        Text("Sifting…", style = MaterialTheme.typography.titleLarge)
+        Text(ScanEngine.stage.ifEmpty { "Sifting" } + "…", style = MaterialTheme.typography.titleLarge)
         Spacer(Modifier.height(16.dp))
         LinearProgressIndicator(
-            progress = { if (vm.progressTotal > 0) vm.progressDone / vm.progressTotal.toFloat() else 0f },
+            progress = { if (ScanEngine.total > 0) ScanEngine.done / ScanEngine.total.toFloat() else 0f },
             modifier = Modifier.fillMaxWidth(),
         )
         Spacer(Modifier.height(8.dp))
-        Text("${vm.progressDone} of ${vm.progressTotal}")
-        if (vm.languages.isNotEmpty()) {
-            Text("Languages: ${vm.languages.replace("+", ", ")}", style = MaterialTheme.typography.bodySmall)
+        Text("${ScanEngine.done} of ${ScanEngine.total}")
+        if (ScanEngine.languages.isNotEmpty()) {
+            Text("Languages: ${ScanEngine.languages.replace("+", ", ")}", style = MaterialTheme.typography.bodySmall)
         }
         Spacer(Modifier.height(24.dp))
-        Text("Keep this screen open.", style = MaterialTheme.typography.bodySmall)
+        Text(
+            "You can leave the app — sifting carries on in the background, with progress in your notifications.",
+            style = MaterialTheme.typography.bodySmall,
+            textAlign = TextAlign.Center,
+        )
         Spacer(Modifier.height(8.dp))
         OutlinedButton(onClick = vm::cancelScan) { Text("Stop") }
     }
@@ -352,14 +441,17 @@ fun ResultsScreen(vm: MainViewModel) {
         Bucket.POSTER to "Posters",
         Bucket.FORWARD to "Forwards",
         Bucket.MEME to "Memes",
+        null to "Duplicates",
         Bucket.CHECK to "Not sure",
         Bucket.KEEP to "Kept",
     )
     var tab by rememberSaveable { mutableIntStateOf(0) }
     var viewing by remember { mutableStateOf<Item?>(null) }
+    var viewingFile by remember { mutableStateOf<File?>(null) }
     var confirmDelete by remember { mutableStateOf(false) }
-    val current = vm.items.filter { it.bucket == tabs[tab].first }
-    val selectedCount = vm.items.count { it.selected }
+    val showingDuplicates = tabs[tab].first == null
+    val current = if (showingDuplicates) emptyList() else vm.items.filter { it.bucket == tabs[tab].first }
+    val selectedCount = vm.selectedCount
 
     Column(Modifier.fillMaxSize()) {
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(end = 16.dp)) {
@@ -375,20 +467,33 @@ fun ResultsScreen(vm: MainViewModel) {
                 Tab(
                     selected = tab == i,
                     onClick = { tab = i },
-                    text = { Text("$label (${vm.items.count { it.bucket == bucket }})") },
+                    text = {
+                        val n = if (bucket == null) vm.dupGroups.size else vm.items.count { it.bucket == bucket }
+                        Text("$label ($n)")
+                    },
                 )
             }
         }
         Row(Modifier.padding(horizontal = 8.dp)) {
-            TextButton(onClick = { current.forEach { it.set(true) } }) { Text("Select all") }
-            TextButton(onClick = { current.forEach { it.set(false) } }) { Text("Select none") }
+            if (showingDuplicates) {
+                TextButton(onClick = {
+                    vm.dupGroups.forEach { g -> g.members.forEach { it.selected = !it.best } }
+                }) { Text("Select all extras") }
+                TextButton(onClick = {
+                    vm.dupGroups.forEach { g -> g.members.forEach { it.selected = false } }
+                }) { Text("Select none") }
+            } else {
+                TextButton(onClick = { current.forEach { it.set(true) } }) { Text("Select all") }
+                TextButton(onClick = { current.forEach { it.set(false) } }) { Text("Select none") }
+            }
         }
         val hint = when (tabs[tab].first) {
             Bucket.KEEP -> "Most likely clutter is shown first. Select anything it missed — it learns from it."
             Bucket.CHECK -> "Siftly isn't sure about these. Tap to clear, hold to view and label."
+            null -> "Identical copies of the kept one are pre-selected. Look-alikes aren't — choose yourself."
             else -> null
         }
-        if (hint != null && current.isNotEmpty()) {
+        if (hint != null && (current.isNotEmpty() || (showingDuplicates && vm.dupGroups.isNotEmpty()))) {
             Text(
                 hint,
                 style = MaterialTheme.typography.bodySmall,
@@ -396,7 +501,9 @@ fun ResultsScreen(vm: MainViewModel) {
                 modifier = Modifier.padding(horizontal = 16.dp),
             )
         }
-        if (current.isEmpty()) {
+        if (showingDuplicates) {
+            DuplicatesList(vm, Modifier.weight(1f), onView = { viewingFile = it })
+        } else if (current.isEmpty()) {
             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                 Text("Nothing here", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
@@ -451,6 +558,106 @@ fun ResultsScreen(vm: MainViewModel) {
     }
 
     viewing?.let { item -> Viewer(item, onClose = { viewing = null }) }
+    viewingFile?.let { f -> PlainViewer(f, onClose = { viewingFile = null }) }
+}
+
+@Composable
+fun DuplicatesList(vm: MainViewModel, modifier: Modifier, onView: (File) -> Unit) {
+    if (vm.dupGroups.isEmpty()) {
+        Box(modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+            Text("No duplicates found", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        return
+    }
+    LazyColumn(modifier, contentPadding = PaddingValues(vertical = 4.dp)) {
+        items(vm.dupGroups, key = { it.id }) { g ->
+            Column(Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
+                Text(
+                    if (g.exact) "${g.members.size} identical copies" else "${g.members.size} look-alikes",
+                    style = MaterialTheme.typography.labelLarge,
+                    modifier = Modifier.padding(start = 4.dp, bottom = 4.dp),
+                )
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    items(g.members, key = { it.file.path }) { m -> DupTile(m, onLongPress = { onView(m.file) }) }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun DupTile(m: DupMember, onLongPress: () -> Unit) {
+    Column(Modifier.width(118.dp)) {
+        Box(
+            Modifier
+                .size(118.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .combinedClickable(onClick = { m.selected = !m.selected }, onLongClick = onLongPress),
+        ) {
+            AsyncImage(
+                model = m.file,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+            if (m.selected) Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.35f)))
+            val (label, color) = when {
+                m.selected -> "Extra" to Brand.Coral
+                m.best -> "Keep" to Brand.Mint
+                else -> null to Color.Transparent
+            }
+            if (label != null) {
+                Text(
+                    label,
+                    color = if (color == Brand.Mint) Brand.Ink else Color.White,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(6.dp)
+                        .background(color, RoundedCornerShape(6.dp))
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                )
+            }
+            Checkbox(
+                checked = m.selected,
+                onCheckedChange = { m.selected = it },
+                colors = CheckboxDefaults.colors(
+                    checkedColor = Brand.Coral,
+                    uncheckedColor = Color.White,
+                    checkmarkColor = Color.White,
+                ),
+                modifier = Modifier.align(Alignment.TopEnd),
+            )
+        }
+        Text(
+            Gallery.displayName(m.file.parentFile),
+            style = MaterialTheme.typography.bodySmall,
+            maxLines = 1,
+            modifier = Modifier.padding(top = 2.dp, start = 2.dp),
+        )
+    }
+}
+
+@Composable
+fun PlainViewer(file: File, onClose: () -> Unit) {
+    Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Box(Modifier.fillMaxSize().background(Color.Black).clickable { onClose() }) {
+            AsyncImage(
+                model = file,
+                contentDescription = null,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxSize(),
+            )
+            Text(
+                file.path.removePrefix("/storage/emulated/0/"),
+                color = Color.White,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.align(Alignment.BottomCenter).padding(24.dp),
+            )
+        }
+    }
 }
 
 /** Full-size view, with buttons to say what the image is. */
